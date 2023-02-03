@@ -90,6 +90,8 @@ func (i *informerHandler) OnAdd(obj interface{}) {
 			klog.Infoln(err)
 		}
 	}
+	// resourceVersion should not be set on objects to be created
+	// 可能的处理方法 需要先更新这个deploy
 	_, err := i.clientset.AppsV1().Deployments(dp.Namespace).Create(context.Background(), dp, v12.CreateOptions{})
 	if err != nil {
 		klog.Infoln(err)
