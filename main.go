@@ -35,14 +35,17 @@ func main() {
 	// 构建一个新的informer factory对象
 	factory := informers.NewSharedInformerFactory(clientset, 0)
 	// 说明资源对象的informer
-	informers := factory.Apps().V1().Deployments().Informer()
+	informer := factory.Apps().V1().Deployments().Informer()
 	// 给informer添加handler 需要实现 OnAdd OnUpdate OnDelete 三个方法
-	informers.AddEventHandler(&informerHandler{
+	_, err = informer.AddEventHandler(&informerHandler{
 		clientset: clientset,
 	})
+	if err != nil {
+		return
+	}
 	stop := make(chan struct{}, 2)
 	// 调用RUN函数 需要传入停止channel
-	go informers.Run(stop)
+	go informer.Run(stop)
 	forever := make(chan os.Signal, 1)
 	signal.Notify(forever, syscall.SIGINT, syscall.SIGTERM)
 	<-forever
@@ -55,13 +58,21 @@ type informerHandler struct {
 	clientset *kubernetes.Clientset
 }
 
+func (i *informerHandler) OnUpdate(oldObj, newObj interface{}) {
+
+}
+
+func (i *informerHandler) OnDelete(obj interface{}) {
+
+}
+
 func (i *informerHandler) OnAdd(obj interface{}) {
 	dp := obj.(*v1.Deployment)
 	if dp.ObjectMeta.Annotations["needFluentd"] == "yes" {
-		klog.Infof("need fluentd %s", dp.Name)
-		// 这里就是具体的逻辑
-		dp.Spec.Template.Spec.Containers = append(dp.Spec.Template.Spec.Containers, v13.Container{
-			Name:  "fluentd-sidecar",
+
+		dp2, err := i.clientset.AppsV1().Deployments(dp.Namespace).Get(context.TODO(), dp.Name, v12.GetOptions{})
+		klog.Infof("ADD: the old version %s %s", dp2.Name, dp2.ObjectMeta.ResourceVersion)
+		fluentContainer := v13.Container{Name: "fluentd-sidecar",
 			Image: "fluent/fluentd:v1.15-debian-1",
 			Env: []v13.EnvVar{
 				v13.EnvVar{
@@ -75,37 +86,34 @@ func (i *informerHandler) OnAdd(obj interface{}) {
 					ReadOnly:  false,
 					MountPath: "/fluentd/etc",
 				},
-			},
-		})
-		dp.Spec.Template.Spec.Volumes = append(dp.Spec.Template.Spec.Volumes, v13.Volume{
+			}}
+		fluentVolumne := v13.Volume{
 			Name: "config-volume",
 			VolumeSource: v13.VolumeSource{
 				ConfigMap: &v13.ConfigMapVolumeSource{
 					LocalObjectReference: v13.LocalObjectReference{Name: "fluentd-config-sidecar"},
 				},
 			},
-		})
-		_, err := i.clientset.AppsV1().Deployments(dp.Namespace).Update(context.Background(), dp, v12.UpdateOptions{})
+		}
+		dp2.Spec.Template.Spec.Containers = append(dp2.Spec.Template.Spec.Containers, fluentContainer)
+		dp2.Spec.Template.Spec.Volumes = append(dp2.Spec.Template.Spec.Volumes, fluentVolumne)
+		dp2, err = i.clientset.AppsV1().Deployments(dp2.Namespace).Update(context.Background(), dp2, v12.UpdateOptions{})
 		if err != nil {
 			klog.Infoln(err)
 		}
+		dp = dp2.DeepCopy()
+		klog.Infof("ADD: the new version %s %s", dp2.Name, dp2.ObjectMeta.ResourceVersion)
+		return
 	}
+
 	// resourceVersion should not be set on objects to be created
 	// 可能的处理方法 需要先更新这个deploy
+	if dp.Status.AvailableReplicas >= *dp.Spec.Replicas {
+		return
+	}
 	_, err := i.clientset.AppsV1().Deployments(dp.Namespace).Create(context.Background(), dp, v12.CreateOptions{})
 	if err != nil {
-		klog.Infoln(err)
-	}
-}
-func (i *informerHandler) OnUpdate(oldObj, newObj interface{}) {
-	_, err := i.clientset.AppsV1().Deployments(newObj.(*v1.Deployment).Namespace).Update(context.Background(), newObj.(*v1.Deployment), v12.UpdateOptions{})
-	if err != nil {
-		klog.Infoln(err)
-	}
-}
-func (i *informerHandler) OnDelete(obj interface{}) {
-	err := i.clientset.AppsV1().Deployments(obj.(*v1.Deployment).Namespace).Delete(context.Background(), obj.(*v1.Deployment).Name, v12.DeleteOptions{})
-	if err != nil {
+
 		klog.Infoln(err)
 	}
 }
